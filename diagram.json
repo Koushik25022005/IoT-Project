@@ -3,44 +3,77 @@
   "author": "Koushik Sripathi",
   "editor": "wokwi",
   "parts": [
-    { "type": "board-esp8266", "id": "esp1", "top": 0, "left": 120 },
-    { "type": "hc-sr04", "id": "ultra1", "top": 220, "left": 0 },
-    { "type": "hc-sr04", "id": "ultra2", "top": 380, "left": 0 },
-    { "type": "hc-sr04", "id": "ultra3", "top": 220, "left": 350 },
-    { "type": "hc-sr04", "id": "ultra4", "top": 380, "left": 350 },
-    { "type": "led", "id": "led1", "top": 260, "left": -60, "color": "red" },
-    { "type": "led", "id": "led2", "top": 420, "left": -60, "color": "red" },
-    { "type": "led", "id": "led3", "top": 260, "left": 480, "color": "red" },
-    { "type": "led", "id": "led4", "top": 420, "left": 480, "color": "red" }
+    { "type": "board-esp32-devkit-c-v4", "id": "esp", "top": -9.6, "left": -23.96, "attrs": {} },
+    {
+      "type": "wokwi-hc-sr04",
+      "id": "ultrasonic1",
+      "top": -31.9,
+      "left": -218.9,
+      "rotate": -90,
+      "attrs": {}
+    },
+    {
+      "type": "wokwi-hc-sr04",
+      "id": "ultrasonic2",
+      "top": 150.5,
+      "left": -218.9,
+      "rotate": -90,
+      "attrs": {}
+    },
+    {
+      "type": "wokwi-hc-sr04",
+      "id": "ultrasonic3",
+      "top": 1.5,
+      "left": 91.9,
+      "rotate": 90,
+      "attrs": {}
+    },
+    {
+      "type": "wokwi-hc-sr04",
+      "id": "ultrasonic4",
+      "top": 187.5,
+      "left": 77.7,
+      "rotate": 90,
+      "attrs": {}
+    },
+    { "type": "wokwi-led", "id": "led1", "top": 34.8, "left": -92.2, "attrs": { "color": "red" } },
+    {
+      "type": "wokwi-led",
+      "id": "led2",
+      "top": 111.6,
+      "left": -92.2,
+      "attrs": { "color": "red" }
+    },
+    { "type": "wokwi-led", "id": "led3", "top": 63.6, "left": 90.2, "attrs": { "color": "red" } },
+    { "type": "wokwi-led", "id": "led4", "top": 150, "left": 90.2, "attrs": { "color": "red" } }
   ],
   "connections": [
-    [ "esp1:GND.1", "ultra1:GND", "black", [ "v0" ] ],
-    [ "esp1:3V3", "ultra1:VCC", "red", [ "v0" ] ],
-    [ "esp1:D1", "ultra1:TRIG", "yellow", [ "v0" ] ],
-    [ "esp1:D2", "ultra1:ECHO", "green", [ "v0" ] ],
-    [ "ultra1:GND", "led1:C", "black", [ "v0" ] ],
-    [ "esp1:D5", "led1:A", "blue", [ "v0" ] ],
-
-    [ "esp1:GND.1", "ultra2:GND", "black", [ "v0" ] ],
-    [ "esp1:3V3", "ultra2:VCC", "red", [ "v0" ] ],
-    [ "esp1:D3", "ultra2:TRIG", "yellow", [ "v0" ] ],
-    [ "esp1:D4", "ultra2:ECHO", "green", [ "v0" ] ],
-    [ "ultra2:GND", "led2:C", "black", [ "v0" ] ],
-    [ "esp1:D6", "led2:A", "blue", [ "v0" ] ],
-
-    [ "esp1:GND.1", "ultra3:GND", "black", [ "v0" ] ],
-    [ "esp1:3V3", "ultra3:VCC", "red", [ "v0" ] ],
-    [ "esp1:D7", "ultra3:TRIG", "yellow", [ "v0" ] ],
-    [ "esp1:D8", "ultra3:ECHO", "green", [ "v0" ] ],
-    [ "ultra3:GND", "led3:C", "black", [ "v0" ] ],
-    [ "esp1:D0", "led3:A", "blue", [ "v0" ] ],
-
-    [ "esp1:GND.1", "ultra4:GND", "black", [ "v0" ] ],
-    [ "esp1:3V3", "ultra4:VCC", "red", [ "v0" ] ],
-    [ "esp1:RX", "ultra4:TRIG", "yellow", [ "v0" ] ],
-    [ "esp1:TX", "ultra4:ECHO", "green", [ "v0" ] ],
-    [ "ultra4:GND", "led4:C", "black", [ "v0" ] ],
-    [ "esp1:D9", "led4:A", "blue", [ "v0" ] ]
+    [ "esp:TX", "$serialMonitor:RX", "", [] ],
+    [ "esp:RX", "$serialMonitor:TX", "", [] ],
+    [ "ultrasonic1:GND", "esp:GND.1", "black", [ "h0" ] ],
+    [ "ultrasonic2:GND", "esp:GND.1", "black", [ "h0" ] ],
+    [ "ultrasonic1:VCC", "esp:3V3", "red", [ "h0" ] ],
+    [ "ultrasonic2:VCC", "esp:EN", "red", [ "h0" ] ],
+    [ "ultrasonic3:GND", "esp:GND.2", "black", [ "h0" ] ],
+    [ "ultrasonic4:GND", "esp:GND.2", "black", [ "h0" ] ],
+    [ "ultrasonic3:VCC", "esp:3V3", "red", [ "h0" ] ],
+    [ "ultrasonic4:VCC", "esp:3V3", "red", [ "h0" ] ],
+    [ "ultrasonic1:ECHO", "esp:32", "green", [ "h0" ] ],
+    [ "ultrasonic2:ECHO", "esp:26", "green", [ "h0" ] ],
+    [ "ultrasonic1:TRIG", "esp:4", "green", [ "h0" ] ],
+    [ "ultrasonic2:TRIG", "esp:0", "green", [ "h0" ] ],
+    [ "ultrasonic4:TRIG", "esp:17", "green", [ "h0" ] ],
+    [ "ultrasonic4:ECHO", "esp:33", "green", [ "h0" ] ],
+    [ "ultrasonic3:TRIG", "esp:19", "green", [ "h0" ] ],
+    [ "ultrasonic3:ECHO", "esp:13", "green", [ "h0" ] ],
+    [ "led1:C", "esp:GND.1", "green", [ "v0" ] ],
+    [ "led1:A", "esp:25", "green", [ "v0" ] ],
+    [ "led2:C", "esp:GND.1", "green", [ "v0" ] ],
+    [ "led2:A", "esp:27", "green", [ "v0" ] ],
+    [ "led4:C", "esp:GND.3", "green", [ "v0" ] ],
+    [ "led4:A", "esp:12", "green", [ "v0" ] ],
+    [ "led3:C", "esp:GND.3", "green", [ "v0" ] ],
+    [ "led3:A", "esp:14", "green", [ "v0" ] ]
   ],
-  "dependecies":{}
+  "dependencies": {}
 }

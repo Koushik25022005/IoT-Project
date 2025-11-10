@@ -1,131 +1,312 @@
-from coapthon.server.coap import CoAP
-from coapthon.resources.resource import Resource
-import json
+import network
+import socket
 import time
-from threading import Lock
-import sqlite3
-from datetime import datetime
+import machine
+from machine import Pin
 
-class ParkingResource(Resource):
-    def __init__(self, name="ParkingResource", coap_server=None):
-        super(ParkingResource, self).__init__(name, coap_server)
-        self.parking_status = {
-            "slot1": {"occupied": False, "last_updated": 0, "car_count": 0},
-            "slot2": {"occupied": False, "last_updated": 0, "car_count": 0},
-            "slot3": {"occupied": False, "last_updated": 0, "car_count": 0},
-            "slot4": {"occupied": False, "last_updated": 0, "car_count": 0}
-        }
-        self.lock = Lock()
-        self.setup_database()
-        
-    def setup_database(self):
-        """Initialize SQLite database for logging"""
-        self.conn = sqlite3.connect('parking.db', check_same_thread=False)
-        cursor = self.conn.cursor()
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS parking_events (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                slot_id TEXT NOT NULL,
-                event_type TEXT NOT NULL,
-                timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
-            )
-        ''')
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS parking_stats (
-                slot_id TEXT PRIMARY KEY,
-                total_cars INTEGER DEFAULT 0,
-                last_updated DATETIME DEFAULT CURRENT_TIMESTAMP
-            )
-        ''')
-        self.conn.commit()
-        
-    def log_event(self, slot_id, event_type):
-        """Log parking events to database"""
-        cursor = self.conn.cursor()
-        cursor.execute(
-            "INSERT INTO parking_events (slot_id, event_type) VALUES (?, ?)",
-            (slot_id, event_type)
-        )
-        
-        # Update statistics
-        if event_type == "car_entered":
-            cursor.execute('''
-                INSERT OR REPLACE INTO parking_stats (slot_id, total_cars, last_updated)
-                VALUES (?, COALESCE((SELECT total_cars FROM parking_stats WHERE slot_id = ?), 0) + 1, CURRENT_TIMESTAMP)
-            ''', (slot_id, slot_id))
-            
-        self.conn.commit()
-        
-    def render_GET(self, request):
-        """Handle GET request - return current parking status"""
-        with self.lock:
-            response = self._init_response(request)
-            # Add available slots count
-            available_slots = sum(1 for slot in self.parking_status.values() if not slot["occupied"])
-            status_with_meta = {
-                "parking_status": self.parking_status,
-                "available_slots": available_slots,
-                "total_slots": len(self.parking_status)
-            }
-            response.payload = json.dumps(status_with_meta)
-        return response
+# -----------------------
+# CONFIG
+# -----------------------
+WIFI_SSID = "Wokwi-GUEST"
+WIFI_PASS = ""
 
-    def render_PUT(self, request):
-        """Handle PUT request - update parking slot status"""
-        try:
-            data = json.loads(request.payload)
-            slot_id = data.get("slot_id")
-            occupied = data.get("occupied")
-            
-            if slot_id in self.parking_status and isinstance(occupied, bool):
-                with self.lock:
-                    previous_state = self.parking_status[slot_id]["occupied"]
-                    self.parking_status[slot_id]["occupied"] = occupied
-                    self.parking_status[slot_id]["last_updated"] = time.time()
-                    
-                    # Log the event
-                    if occupied and not previous_state:
-                        self.parking_status[slot_id]["car_count"] += 1
-                        self.log_event(slot_id, "car_entered")
-                        print(f"Car entered {slot_id}")
-                    elif not occupied and previous_state:
-                        self.log_event(slot_id, "car_exited")
-                        print(f"Car exited {slot_id}")
-                    
-                    response = self._init_response(request)
-                    response_data = {
-                        "status": "success", 
-                        "slot": slot_id, 
-                        "occupied": occupied,
-                        "car_count": self.parking_status[slot_id]["car_count"]
-                    }
-                    response.payload = json.dumps(response_data)
-            else:
-                response = self._init_response(request)
-                response.payload = json.dumps({"status": "error", "message": "Invalid data"})
-                response.code = 400
-                
-        except Exception as e:
-            response = self._init_response(request)
-            response.payload = json.dumps({"status": "error", "message": str(e)})
-            response.code = 400
-            
-        return response
+# CoAP server to send occupancy notifications to (change to your target)
+SERVER_IP = "10.0.2.2"   # default Wokwi host IP -> change if needed
+COAP_PORT = 5683
 
-class CoAPParkingServer(CoAP):
-    def __init__(self, host, port):
-        CoAP.__init__(self, (host, port))
-        self.add_resource('parking/', ParkingResource())
+# Occupancy threshold (cm)
+OCCUPIED_THRESHOLD = 30.0
 
-def main():
-    server = CoAPParkingServer("0.0.0.0", 5683)
-    print("CoAP Parking Server started on coap://0.0.0.0:5683/parking/")
+# Poll interval (s)
+POLL_INTERVAL = 1.0
+
+# Minimal message id generator
+_msg_id = 0
+def next_msg_id():
+    global _msg_id
+    _msg_id = (_msg_id + 1) & 0xFFFF
+    if _msg_id == 0:
+        _msg_id = 1
+    return _msg_id
+
+# -----------------------
+# Pin mapping (from your JSON)
+# Ultrasonic (TRIG/ECHO):
+# ultrasonic1: TRIG=4  ECHO=32
+# ultrasonic2: TRIG=0  ECHO=26
+# ultrasonic3: TRIG=19 ECHO=13
+# ultrasonic4: TRIG=17 ECHO=33
+# -----------------------
+SENSORS = [
+    {"name": "slot1", "trig": 4, "echo": 32},
+    {"name": "slot2", "trig": 0, "echo": 26},
+    {"name": "slot3", "trig": 19, "echo": 13},
+    {"name": "slot4", "trig": 17, "echo": 33},
+]
+
+# LED pin mapping (REMAPPED in software to avoid collisions — change if you rewire)
+LED_PINS = {
+    "slot1": 25,
+    "slot2": 27,
+    "slot3": 14,
+    "slot4": 12,
+}
+
+# -----------------------
+# WiFi connect
+# -----------------------
+def wifi_connect(ssid, password, timeout=15):
+    wlan = network.WLAN(network.STA_IF)
+    wlan.active(True)
+    if not wlan.isconnected():
+        print("Connecting to WiFi...", ssid)
+        wlan.connect(ssid, password)
+        t0 = time.time()
+        while not wlan.isconnected():
+            if time.time() - t0 > timeout:
+                raise RuntimeError("WiFi connect timeout")
+            time.sleep(0.5)
+    print("Connected, IP:", wlan.ifconfig()[0])
+
+# -----------------------
+# HC-SR04 helper (MicroPython)
+# returns distance in cm or None on timeout
+# -----------------------
+def measure_distance(trig_pin_num, echo_pin_num, timeout_us=30000):
+    trig = Pin(trig_pin_num, Pin.OUT)
+    echo = Pin(echo_pin_num, Pin.IN)
+    trig.off()
+    time.sleep_us(2)
+    trig.on()
+    time.sleep_us(10)
+    trig.off()
     try:
-        server.listen(10)
-    except KeyboardInterrupt:
-        print("Server Shutdown")
-        server.close()
-        print("Exiting...")
+        dur = machine.time_pulse_us(echo, 1, timeout_us)
+        dist_cm = (dur / 2.0) / 29.1
+        return dist_cm
+    except OSError:
+        return None
 
-if __name__ == '__main__':
-    main()
+# -----------------------
+# Minimal CoAP encoder
+# -----------------------
+def build_coap_request(msg_id, method_code, path, payload=b"", confirmable=True):
+    ver = 1
+    t = 0 if confirmable else 1
+    token = b""
+    tkl = len(token) & 0x0F
+    first = (ver << 6) | ((t & 0x03) << 4) | (tkl & 0x0F)
+    code_byte = method_code & 0xFF
+    header = bytes([first, code_byte, (msg_id >> 8) & 0xFF, msg_id & 0xFF])
+    buf = bytearray(header)
+
+    last_option_number = 0
+    if path:
+        segs = [s for s in path.strip("/").split("/") if s]
+        for seg in segs:
+            opt_num = 11
+            delta = opt_num - last_option_number
+            last_option_number = opt_num
+            val = seg.encode()
+            length = len(val)
+            if delta >= 13 or length >= 13:
+                raise ValueError("path segments too long")
+            opt_header = ((delta & 0x0F) << 4) | (length & 0x0F)
+            buf.append(opt_header)
+            if length:
+                buf.extend(val)
+    if payload:
+        buf.append(0xFF)
+        if isinstance(payload, str):
+            payload = payload.encode()
+        buf.extend(payload)
+    return bytes(buf)
+
+# -----------------------
+# Minimal CoAP parser
+# -----------------------
+def parse_coap_message(data):
+    if len(data) < 4:
+        return None
+    first = data[0]
+    ver = (first >> 6) & 0x03
+    t = (first >> 4) & 0x03
+    tkl = first & 0x0F
+    code = data[1]
+    msg_id = (data[2] << 8) | data[3]
+    idx = 4
+    if tkl:
+        idx += tkl
+    last_option = 0
+    path_segments = []
+    while idx < len(data):
+        b = data[idx]
+        if b == 0xFF:
+            idx += 1
+            break
+        delta = (b >> 4) & 0x0F
+        length = b & 0x0F
+        idx += 1
+        opt_num = last_option + delta
+        last_option = opt_num
+        opt_val = data[idx:idx+length] if length else b""
+        idx += length
+        if opt_num == 11:
+            path_segments.append(opt_val.decode())
+    payload = data[idx:] if idx <= len(data) else b''
+    path = "/" + "/".join(path_segments) if path_segments else "/"
+    return {"ver": ver, "type": t, "code": code, "msg_id": msg_id, "path": path, "payload": payload}
+
+# -----------------------
+# CoAP socket helper
+# -----------------------
+sock = None
+def udp_create_socket(bind_port=None):
+    global sock
+    if sock:
+        try:
+            sock.close()
+        except:
+            pass
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    sock.settimeout(0.5)
+    if bind_port:
+        sock.bind(('', bind_port))
+    return sock
+
+# -----------------------
+# High-level send_coap
+# -----------------------
+def send_coap(method_code, path, payload=b"", server_ip=SERVER_IP, server_port=COAP_PORT, confirmable=False):
+    msg_id = next_msg_id()
+    pkt = build_coap_request(msg_id, method_code, path, payload, confirmable=confirmable)
+    try:
+        sock.sendto(pkt, (server_ip, server_port))
+    except Exception as e:
+        print("CoAP send error:", e)
+
+# -----------------------
+# Initialize sensors and LEDs
+# -----------------------
+sensor_objs = []
+for s in SENSORS:
+    trig = Pin(s["trig"], Pin.OUT)
+    trig.off()
+    echo_pin = s["echo"]
+    sensor_objs.append({"name": s["name"], "trig": s["trig"], "echo": echo_pin, "state": None})
+
+led_objs = {}
+for name, pin_num in LED_PINS.items():
+    p = Pin(pin_num, Pin.OUT)
+    p.off()
+    led_objs[name] = p
+
+# -----------------------
+# Start UDP socket bound to 5683 to act as server
+# -----------------------
+udp_create_socket(bind_port=COAP_PORT)
+print("CoAP UDP socket ready on port", COAP_PORT)
+
+# -----------------------
+# Handle inbound CoAP requests
+# -----------------------
+def handle_incoming():
+    try:
+        data, addr = sock.recvfrom(1024)
+    except OSError:
+        return
+    except Exception as e:
+        print("recv error:", e)
+        return
+
+    if not data:
+        return
+
+    parsed = parse_coap_message(data)
+    if not parsed:
+        print("Malformed CoAP packet from", addr)
+        return
+
+    print("Received CoAP:", parsed["path"], "from", addr)
+    method = parsed["code"] & 0xFF
+    if method == 3 and parsed["path"].startswith("/led"):
+        slot = parsed["path"].lstrip("/")
+        payload = parsed["payload"].decode().strip().lower()
+        if slot in led_objs:
+            if payload == "on":
+                led_objs[slot].on()
+                print(slot, "ON")
+            elif payload == "off":
+                led_objs[slot].off()
+                print(slot, "OFF")
+        resp_code = 0x44
+        first = (1 << 6) | ((2 & 0x03) << 4) | 0
+        header = bytes([first, resp_code, (parsed["msg_id"] >> 8) & 0xFF, parsed["msg_id"] & 0xFF])
+        try:
+            sock.sendto(header, addr)
+        except Exception as e:
+            print("reply error", e)
+    else:
+        resp_code = 0x84
+        first = (1 << 6) | ((2 & 0x03) << 4) | 0
+        header = bytes([first, resp_code, (parsed["msg_id"] >> 8) & 0xFF, parsed["msg_id"] & 0xFF])
+        try:
+            sock.sendto(header, addr)
+        except Exception:
+            pass
+
+# -----------------------
+# Main loop
+# -----------------------
+def main():
+    wifi_connect(WIFI_SSID, WIFI_PASS)
+    print("Starting monitoring loop. Notifying server:", SERVER_IP)
+    last_states = {s["name"]: None for s in sensor_objs}
+
+    while True:
+        for s in sensor_objs:
+            d = measure_distance(s["trig"], s["echo"])
+            name = s["name"]
+
+            if d is None:
+                state = last_states[name]
+            else:
+                state = "occupied" if d < OCCUPIED_THRESHOLD else "free"
+
+            if state != last_states[name]:
+                print("State change", name, "->", state, "(dist:", d, "cm)")
+
+                # Update LED locally
+                try:
+                    if state == "occupied":
+                        led_objs[name].on()
+                    else:
+                        led_objs[name].off()
+                except KeyError:
+                    pass
+
+                # Send CoAP update
+                path = "/" + name
+                try:
+                    send_coap(2, path, payload=state)
+                except Exception as e:
+                    print("Failed to send CoAP:", e)
+
+                last_states[name] = state
+
+            time.sleep(0.05)
+
+        t0 = time.time()
+        while time.time() - t0 < POLL_INTERVAL:
+            handle_incoming()
+            time.sleep(0.05)
+
+# -----------------------
+# Run
+# -----------------------
+if __name__ == "_main_":
+    try:
+        main()
+    except Exception as e:
+        print("Fatal error:", e)
+        raise
